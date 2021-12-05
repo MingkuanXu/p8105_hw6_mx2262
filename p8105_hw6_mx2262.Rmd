@@ -1,29 +1,153 @@
 ---
 title: "P8105 - Homework 6"
 author: "Mingkuan Xu"
-output: html_document
+output: github_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r}
+```{r,message=FALSE}
 library(tidyverse)
+library(corrplot)
+library(modelr)
+library(mgcv)
 ```
 
 ## Problem 1
 
-```{r}
+### Part 1 - Data Preprocessing 
+
+```{r message=FALSE}
 
 birth_data = read_csv("birthweight.csv") %>%
   janitor::clean_names() %>%
   mutate(
     # parents' race, babysex and malform should be factored
-    frace = factor(frace),
-    mrace = factor(mrace),
-    babysex = factor(babysex),
-    
-  )
+    frace = as.factor(frace),
+    mrace = as.factor(mrace),
+    babysex = as.factor(babysex),
+    malform = as.factor(malform))
 
+# Calculate number of missing values
+sum(is.na(birth_data))
+```
+### Part 2 - Build Model
+
+To build a regression model for the birth weight, we start by taking a closer look of each variables, calculate the pairwise correlations between variables, and list all the correlations between the birth weight and all other variables.
+Notice that for columns pnumlbw and pnumgsa, all values are zero so we remove them. 
+
+```{r}
+birth_data_cor = birth_data %>%
+  select(-babysex,-frace,-mrace,-malform,-pnumlbw,-pnumsga) %>%
+  relocate(bwt) %>%
+  cor(use="complete.obs")
+corrplot(birth_data_cor, type = "upper", diag = FALSE)
+```
+
+Now we observe from the heatmap that bwt is associated with bhead, blength, delwt, and gaweeks, we consider building a simple regression model using these variables.
+
+```{r}
+model = lm(bwt ~ bhead + blength + delwt + gaweeks, data = birth_data)
+summary(model)
+
+birth_data %>%
+  modelr::add_residuals(model) %>% 
+  modelr::add_predictions(model) %>%
+  ggplot(aes(x = pred, y = resid)) + 
+  labs(
+    x = "Predicted Values",
+    y = "Residuals"
+  ) + 
+  geom_point() +
+  theme_classic()
+```
+
+### Part 3 - Compare With Other Models
+
+```{r}
+model_1 = lm(bwt ~ blength + gaweeks, data = birth_data)
+summary(model_1)
+
+model_2 = lm(bwt ~ bhead + blength + babysex + 
+               bhead*blength + bhead * babysex + blength*babysex +
+               bhead*blength*babysex,
+             data = birth_data)
+summary(model_2)
+
+cv_df = crossv_mc(birth_data, 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble),
+    model_0  = map(train, ~lm(bwt ~ bhead + blength + delwt + gaweeks, data = .)),
+    model_1  = map(train, ~lm(bwt ~ blength + gaweeks, data = .)),
+    model_2  = map(train, ~lm(bwt ~ bhead + blength + babysex + 
+               bhead*blength + bhead * babysex + blength*babysex +
+               bhead*blength*babysex,
+             data = birth_data))) %>% 
+  mutate(
+    rmse_model_0 = map2_dbl(model_0, test, ~rmse(model = .x, data = .y)),
+    rmse_model_1 = map2_dbl(model_1, test, ~rmse(model = .x, data = .y)),
+    rmse_model_2 = map2_dbl(model_2, test, ~rmse(model = .x, data = .y))) %>%
+  select(starts_with('rmse')) %>%
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_") %>%
+  mutate(model = fct_inorder(model)) 
+
+ggplot(cv_df,aes(x = model, y = rmse, fill = model, color = model)) + 
+    geom_violin() +
+    theme_minimal()
+
+```
+
+From the violin plot shown above, we can conclude the model fitted using head circumference, length, sex, and all interactions (including the three-way interaction) is the best, since it has the smallest rmse value; the model fitting using length at birth and gestational age is the worst,since it has the biggest rmse value.
+
+## Problem 2
+
+### Part 1 - Load Data
+
+```{r message=FALSE,warning=FALSE}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+### Part 2 - Bootstrap 
+
+```{r}
+weather_bootstrap = weather_df %>% 
+  modelr::bootstrap(n = 5000) %>% 
+  mutate(
+    models = map(strap, ~lm(tmax ~ tmin, data = .x)),
+    results = map(models, broom::tidy),
+    r_square = map(models, broom::glance))
+
+weather_bootstrap_rsquare =  weather_bootstrap %>% 
+#  select(results, r_square) %>%
+#  unnest(results, r_square)
+  unnest(r_square) %>% 
+  select(r.squared)
+
+ggplot(weather_bootstrap_rsquare,aes(x = r.squared)) + 
+  geom_density() + theme_classic()
+
+weather_bootstrap_rsquare %>%
+  summarise("Lower CI" = quantile(r.squared, probs = 0.025),
+            "Upper CI" = quantile(r.squared, probs = 0.975)) %>% 
+  knitr::kable(digits = 3)
+
+weather_bootstrap_logbeta = weather_bootstrap %>% 
+  unnest(results) 
 ```
